@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Graphite Spike",
+  "version": "0.2.0",
+  "identifier": "com.baozibandit.graphitespike",
+  "build": { "frontendDist": "../docs" },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [{ "title": "Graphite WP0 spike", "width": 1280, "height": 800 }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"]
+  }
+}

@@ -1,4 +1,6 @@
 'use strict';
+const Q = new URLSearchParams(location.search);
+const RENDERER = Q.get('renderer') === 'v1' ? 'v1' : 'v2';
 // Graphite WP0 performance spike: throwaway. 2D canvas, grid spatial index, semantic zoom LOD.
 const TYPES = [
   { name: 'document', color: '#4f8cff', glyph: 'D', shape: 'rect' },
@@ -55,7 +57,9 @@ function makeGraph(n) {
   for (let e = 0; e < E; e++) { adj[fill[src[e]]++] = e; adj[fill[dst[e]]++] = e; }
   const g = { n, x, y, w, h, type, title, E, src, dst, adjStart: deg, adj, minX, minY, maxX, maxY,
     visStamp: new Uint32Array(n), edgeStamp: new Uint32Array(E), vis: new Int32Array(n) };
+  g.label = title.map((t, i) => TYPES[type[i]].glyph + '  ' + t);
   buildIndex(g);
+  if (RENDERER === 'v2') buildV2(g);
   return g;
 }
 
@@ -123,7 +127,7 @@ function shapePath(t, sx, sy, sw, shh) {
   else { const cx = sx + sw / 2, cy = sy + shh / 2; ctx.moveTo(cx, sy); ctx.lineTo(sx + sw, cy); ctx.lineTo(cx, sy + shh); ctx.lineTo(sx, cy); ctx.closePath(); }
 }
 
-function draw() {
+function drawV1() {
   frameNo++;
   const g = G, z = cam.z, hw = vw / 2 / z, hh = vh / 2 / z;
   const x0 = cam.x - hw, y0 = cam.y - hh, x1 = cam.x + hw, y1 = cam.y + hh;
@@ -173,6 +177,129 @@ function draw() {
   }
 }
 
+
+// ================= Renderer v2: cached vector geometry (Path2D) per spatial tile =================
+// Geometry is built once per fixture in tile-local coordinates (float64 world -> small local
+// offsets, so no precision loss), then re-rasterized as vectors every frame through the canvas
+// transform. Nothing is cached as a bitmap: every frame is a full-resolution vector draw.
+const TILE = 4096, CLUSTER = 1280;
+const Z_CLUSTER = 0.02;  // below this, average node < ~2-3 CSS px: aggregate into grid-cell clusters
+const Z_ICON = 0.2;      // vector type icons only when they're big enough to read
+const EDGE_MIN = 320;    // shortest edge (world units); skip all edges when they'd be < 2 px
+function iconPath(p, t, lx, ly, w, h) {
+  const s = Math.min(w, h) * 0.4, cx = lx + w / 2, cy = ly + h / 2, q = s / 2;
+  switch (t) {
+    case 0: for (let k = -1; k <= 1; k++) p.rect(cx - q, cy + k * s * 0.3 - s * 0.06, s, s * 0.12); break; // document: text lines
+    case 1: p.rect(cx - q, cy - q, s, s * 0.18); p.rect(cx - q, cy - q, s * 0.18, s); p.rect(cx - q, cy + q - s * 0.18, s, s * 0.18); p.rect(cx + q - s * 0.18, cy - q, s * 0.18, s); break; // task: checkbox
+    case 2: p.rect(cx - q, cy - s * 0.08, s, s * 0.16); break; // note: single line
+    case 3: p.moveTo(cx - q, cy + q); p.lineTo(cx - s * 0.1, cy - q); p.lineTo(cx + q, cy + q); p.closePath(); break; // image: mountain
+    case 4: p.moveTo(cx - s * 0.2 + s * 0.18, cy); p.arc(cx - s * 0.2, cy, s * 0.18, 0, 6.2832); p.moveTo(cx + s * 0.2 + s * 0.18, cy); p.arc(cx + s * 0.2, cy, s * 0.18, 0, 6.2832); break; // link: chain
+    default: { const c = s * 0.42; p.rect(cx - q, cy - q, c, c); p.rect(cx + q - c, cy - q, c, c); p.rect(cx - q, cy + q - c, c, c); p.rect(cx + q - c, cy + q - c, c, c); } // board: grid
+  }
+}
+function buildV2(g) {
+  const tw = Math.ceil((g.maxX - g.minX) / TILE) + 1, th = Math.ceil((g.maxY - g.minY) / TILE) + 1;
+  const byIdx = new Array(tw * th), tiles = [];
+  const tileOf = (x, y) => {
+    const k = (((y - g.minY) / TILE) | 0) * tw + (((x - g.minX) / TILE) | 0);
+    let t = byIdx[k];
+    if (!t) {
+      const ox = g.minX + (k % tw) * TILE, oy = g.minY + ((k / tw) | 0) * TILE;
+      t = byIdx[k] = { ox, oy, n: 0, shapes: TYPES.map(() => new Path2D()), cards: TYPES.map(() => new Path2D()), icons: new Path2D(), edges: new Path2D(),
+        x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity, nodes: [] };
+      tiles.push(t);
+    }
+    return t;
+  };
+  const grow = (t, x0, y0, x1, y1) => { if (x0 < t.x0) t.x0 = x0; if (y0 < t.y0) t.y0 = y0; if (x1 > t.x1) t.x1 = x1; if (y1 > t.y1) t.y1 = y1; };
+  for (let i = 0; i < g.n; i++) {
+    const t = tileOf(g.x[i], g.y[i]), lx = g.x[i] - t.ox, ly = g.y[i] - t.oy, w = g.w[i], h = g.h[i], ty = g.type[i];
+    const s = TYPES[ty].shape, p = t.shapes[ty];
+    if (s === 'rect') p.rect(lx, ly, w, h);
+    else if (s === 'circle') { const r = Math.min(w, h) / 2; p.moveTo(lx + w / 2 + r, ly + h / 2); p.arc(lx + w / 2, ly + h / 2, r, 0, 6.2832); }
+    else { p.moveTo(lx + w / 2, ly); p.lineTo(lx + w, ly + h / 2); p.lineTo(lx + w / 2, ly + h); p.lineTo(lx, ly + h / 2); p.closePath(); }
+    t.cards[ty].rect(lx, ly, w, h);
+    iconPath(t.icons, ty, lx, ly, w, h);
+    t.n++; t.nodes.push(i); grow(t, g.x[i], g.y[i], g.x[i] + w, g.y[i] + h);
+  }
+  for (let e = 0; e < g.E; e++) {
+    const s = g.src[e], d = g.dst[e], t = tileOf(g.x[s], g.y[s]);
+    const ax = g.x[s] + g.w[s] / 2, ay = g.y[s] + g.h[s] / 2, bx = g.x[d] + g.w[d] / 2, by = g.y[d] + g.h[d] / 2;
+    t.edges.moveTo(ax - t.ox, ay - t.oy); t.edges.lineTo(bx - t.ox, by - t.oy);
+    grow(t, Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by));
+  }
+  for (const t of tiles) t.nodes = Int32Array.from(t.nodes);
+  // grid-cell clusters for sub-visible zoom: dominant type per cell, area ~ node count
+  const cw = Math.ceil((g.maxX - g.minX) / CLUSTER) + 1, ch = Math.ceil((g.maxY - g.minY) / CLUSTER) + 1;
+  const cnt = new Uint16Array(cw * ch * TYPES.length);
+  for (let i = 0; i < g.n; i++) {
+    const c = (((g.y[i] + g.h[i] / 2 - g.minY) / CLUSTER) | 0) * cw + (((g.x[i] + g.w[i] / 2 - g.minX) / CLUSTER) | 0);
+    cnt[c * TYPES.length + g.type[i]]++;
+  }
+  const clusters = TYPES.map(() => new Path2D());
+  for (let c = 0; c < cw * ch; c++) {
+    let tot = 0, best = 0;
+    for (let t = 0; t < TYPES.length; t++) { const v = cnt[c * TYPES.length + t]; tot += v; if (v > cnt[c * TYPES.length + best]) best = t; }
+    if (!tot) continue;
+    const side = Math.min(0.85, 0.27 * Math.sqrt(tot)) * CLUSTER, cx = (c % cw + 0.5) * CLUSTER, cy = (((c / cw) | 0) + 0.5) * CLUSTER;
+    clusters[best].rect(cx - side / 2, cy - side / 2, side, side);
+  }
+  g.v2 = { tiles, clusters, visTiles: new Int32Array(tiles.length) };
+}
+const fontCache = new Map();
+function font(px) { let f = fontCache.get(px); if (!f) fontCache.set(px, (f = px + 'px system-ui,sans-serif')); return f; }
+const EDGE_FAR = 'rgba(140,160,200,0.18)', EDGE_NEAR = 'rgba(140,160,200,0.45)';
+const TYPE_TINT = TYPES.map((t) => t.color + '33');
+function drawV2() {
+  frameNo++;
+  const g = G, V = g.v2, z = cam.z, a = dpr * z, hw = vw / 2 / z, hh = vh / 2 / z;
+  const x0 = cam.x - hw, y0 = cam.y - hh, x1 = cam.x + hw, y1 = cam.y + hh;
+  lodLevel = z < Z_CLUSTER ? -1 : z < LOD1 ? 0 : z < LOD2 ? 1 : 2;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0f1115'; ctx.fillRect(0, 0, vw, vh);
+  let nt = 0, vis = 0; const tiles = V.tiles, vt = V.visTiles;
+  for (let k = 0; k < tiles.length; k++) { const t = tiles[k]; if (t.x0 <= x1 && t.x1 >= x0 && t.y0 <= y1 && t.y1 >= y0) { vt[nt++] = k; vis += t.n; } }
+  visibleCount = vis;
+  const ex = dpr * vw / 2, ey = dpr * vh / 2;
+  if (z * EDGE_MIN >= 2) {
+    ctx.strokeStyle = lodLevel <= 0 ? EDGE_FAR : EDGE_NEAR; ctx.lineWidth = (lodLevel === 2 ? 1.5 : 1) / z;
+    for (let k = 0; k < nt; k++) { const t = tiles[vt[k]]; ctx.setTransform(a, 0, 0, a, ex + (t.ox - cam.x) * a, ey + (t.oy - cam.y) * a); ctx.stroke(t.edges); }
+  }
+  if (lodLevel === -1) {
+    ctx.setTransform(a, 0, 0, a, ex + (g.minX - cam.x) * a, ey + (g.minY - cam.y) * a);
+    for (let t = 0; t < TYPES.length; t++) { ctx.fillStyle = TYPES[t].color; ctx.fill(V.clusters[t]); }
+  } else {
+    const card = lodLevel === 2;
+    for (let ty = 0; ty < TYPES.length; ty++) {
+      ctx.fillStyle = card ? TYPE_TINT[ty] : TYPES[ty].color;
+      if (card) { ctx.strokeStyle = TYPES[ty].color; ctx.lineWidth = 1.5 / z; }
+      for (let k = 0; k < nt; k++) {
+        const t = tiles[vt[k]]; ctx.setTransform(a, 0, 0, a, ex + (t.ox - cam.x) * a, ey + (t.oy - cam.y) * a);
+        const p = card ? t.cards[ty] : t.shapes[ty]; ctx.fill(p); if (card) ctx.stroke(p);
+      }
+    }
+    if (lodLevel === 1 && z >= Z_ICON) {
+      ctx.fillStyle = 'rgba(15,17,21,0.85)';
+      for (let k = 0; k < nt; k++) { const t = tiles[vt[k]]; ctx.setTransform(a, 0, 0, a, ex + (t.ox - cam.x) * a, ey + (t.oy - cam.y) * a); ctx.fill(t.icons); }
+    }
+    if (card) { // titles: screen-space text, only nodes actually on screen
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const fs = Math.round(Math.min(18, 14 * z + 4)); ctx.font = font(fs); ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#e6e8ee';
+      const ox = vw / 2 - cam.x * z, oy = vh / 2 - cam.y * z, X = g.x, Y = g.y, W = g.w, H = g.h;
+      for (let k = 0; k < nt; k++) {
+        const ns = tiles[vt[k]].nodes;
+        for (let m = 0; m < ns.length; m++) {
+          const i = ns[m];
+          if (X[i] > x1 || X[i] + W[i] < x0 || Y[i] > y1 || Y[i] + H[i] < y0) continue;
+          ctx.fillText(g.label[i], X[i] * z + ox + 6, Y[i] * z + oy + 6, W[i] * z - 12);
+        }
+      }
+    }
+  }
+}
+
+const draw = RENDERER === 'v1' ? drawV1 : drawV2;
+
 // ---------- input: mouse wheel/drag + touch pinch/pan via pointer events ----------
 const ptrs = new Map(); let pinch = null;
 canvas.addEventListener('wheel', (e) => { e.preventDefault(); if (!bench) zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0015))); }, { passive: false });
@@ -188,26 +315,50 @@ canvas.addEventListener('pointermove', (e) => {
 const up = (e) => { ptrs.delete(e.pointerId); pinch = null; };
 canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up);
 
+// ---------- environment ----------
+function browserLabel() {
+  const ua = navigator.userAgent, tauri = !!(window.__TAURI_INTERNALS__ || window.__TAURI__);
+  const ver = (re) => (ua.match(re) || [])[1] || '';
+  const android = /Android/.test(ua), wv = /; wv\)/.test(ua);
+  const cr = ver(/Chrome\/(\d+)/);
+  if (tauri) return android ? `Tauri · Android System WebView ${cr}` : /Windows/.test(ua) ? `Tauri · WebView2 ${ver(/Edg\/(\d+)/) || cr}` : `Tauri · WebView ${cr}`;
+  if (wv) return `Android System WebView ${cr}`;
+  if (/Edg[A]?\//.test(ua)) return `Edge ${ver(/Edg[A]?\/(\d+)/)}${android ? ' (Android)' : ''}`;
+  if (/SamsungBrowser/.test(ua)) return `Samsung Internet ${ver(/SamsungBrowser\/(\d+)/)}`;
+  if (/Firefox\//.test(ua)) return `Firefox ${ver(/Firefox\/(\d+)/)}`;
+  if (/HeadlessChrome/.test(ua)) return `Headless Chrome ${ver(/HeadlessChrome\/(\d+)/)}`;
+  if (cr) return `Chrome ${cr}${android ? ' (Android)' : ''}`;
+  if (/Safari\//.test(ua)) return `Safari ${ver(/Version\/(\d+)/)}`;
+  return 'Unknown browser';
+}
+const BROWSER = browserLabel();
+let refreshHz = 0; // detected at startup from idle rAF intervals (no drawing while detecting)
+const HZ = [30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240];
+function snapHz(ms) { const raw = 1000 / ms; return HZ.reduce((b, h) => (Math.abs(h - raw) < Math.abs(b - raw) ? h : b), 60); }
+
 // ---------- telemetry ----------
-const RING = 240, ring = new Float64Array(RING), dring = new Float64Array(RING); let rn = 0;
+const RING = 240, ring = new Float64Array(RING), dring = new Float64Array(RING), sortBuf = new Float64Array(RING); let rn = 0;
 function pct(arr, p) { if (!arr.length) return 0; const s = Float64Array.from(arr).sort(); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; }
+function ringPct(src, m, ps) { const s = sortBuf.subarray(0, m); s.set(src.subarray(0, m)); s.sort(); return ps.map((p) => (m ? s[Math.min(m - 1, Math.floor(p * m))] : 0)); }
 const statsEl = document.getElementById('stats'), progEl = document.getElementById('progress');
+const LOD_NAMES = { '-1': 'clusters', 0: 'shapes', 1: 'icons', 2: 'titles' };
 let lastHud = 0;
 function hud(now) {
   if (now - lastHud < 250) return; lastHud = now;
-  const m = Math.min(rn, RING), iv = ring.subarray(0, m), dv = dring.subarray(0, m);
-  const p50 = pct(iv, 0.5), p95 = pct(iv, 0.95), p99 = pct(iv, 0.99);
+  const m = Math.min(rn, RING); let sum = 0; for (let i = 0; i < m; i++) sum += ring[i];
+  const [p50, p95, p99] = ringPct(ring, m, [0.5, 0.95, 0.99]), [d95, d99] = ringPct(dring, m, [0.95, 0.99]);
   statsEl.innerHTML =
-    `<div>FPS <b>${p50 ? (1000 / (iv.reduce((s, v) => s + v, 0) / m)).toFixed(0) : '-'}</b> · nodes ${G.n.toLocaleString()} · edges ${G.E.toLocaleString()}</div>` +
+    `<div>renderer <b>${RENDERER}</b> · ${BROWSER} · ${refreshHz ? refreshHz + ' Hz' : 'detecting Hz…'}</div>` +
+    `<div>FPS <b>${m ? (1000 / (sum / m)).toFixed(0) : '-'}</b> · nodes ${G.n.toLocaleString()} · edges ${G.E.toLocaleString()}</div>` +
     `<div>frame p50/p95/p99: <b>${p50.toFixed(1)} / ${p95.toFixed(1)} / ${p99.toFixed(1)}</b> ms</div>` +
-    `<div>draw p95/p99: ${pct(dv, 0.95).toFixed(1)} / ${pct(dv, 0.99).toFixed(1)} ms</div>` +
-    `<div>visible ${visibleCount.toLocaleString()} · LOD ${['shapes', 'icons', 'titles'][lodLevel]} · zoom ${cam.z.toFixed(3)}</div>` +
+    `<div>draw p95/p99: ${d95.toFixed(1)} / ${d99.toFixed(1)} ms</div>` +
+    `<div>visible ${visibleCount.toLocaleString()}${RENDERER === 'v2' ? ' (in visible tiles)' : ''} · LOD ${LOD_NAMES[lodLevel]} · zoom ${cam.z.toFixed(3)}</div>` +
     `<div>DPR ${dpr} · canvas ${canvas.width}×${canvas.height}</div>`;
 }
 
 // ---------- auto benchmark ----------
-const BENCH_MS = 15000, WARM_MS = 500;
-let bench = null; // { queue, i, t0, iv:[], dv:[], maxVis, results }
+const BENCH_MS = (+Q.get('secs') || 15) * 1000, WARM_MS = 1000, JITTER = 1.0;
+let bench = null;
 function benchCamera(t) { // scripted sweep, t in [0,1)
   const cx = (G.minX + G.maxX) / 2, cy = (G.minY + G.maxY) / 2, bwid = G.maxX - G.minX, bhgt = G.maxY - G.minY, zMin = minZoom();
   const lerp = (a, b, u) => a + (b - a) * u;
@@ -218,6 +369,7 @@ function benchCamera(t) { // scripted sweep, t in [0,1)
   clampCam();
 }
 function startBench() {
+  if (!refreshHz) return;
   document.getElementById('results').style.display = 'none';
   bench = { queue: COUNTS.slice(), results: [], cur: null };
   nextBench();
@@ -227,50 +379,58 @@ function nextBench() {
   if (n === undefined) return finishBench();
   load(n); bench.cur = { n, t0: performance.now(), iv: [], dv: [], maxVis: 0 };
 }
+const passCell = (ok) => `<td class="${ok ? 'pass' : 'fail'}">${ok ? 'PASS' : 'FAIL'}</td>`;
 function finishBench() {
   const res = bench.results; bench = null; progEl.textContent = '';
-  const rows = res.map((r) => `<tr><td>${r.n.toLocaleString()}</td><td>${r.frames}</td><td>${r.fps.toFixed(0)}</td><td>${r.p50.toFixed(1)}</td><td>${r.p95.toFixed(1)}</td><td><b>${r.p99.toFixed(1)}</b></td><td>${r.d95.toFixed(1)}</td><td>${r.d99.toFixed(1)}</td><td>${r.maxVis.toLocaleString()}</td><td class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'PASS' : 'FAIL'}</td></tr>`).join('');
-  document.getElementById('rtable').innerHTML = `<tr><th>Nodes</th><th>Frames</th><th>Avg FPS</th><th>p50 ms</th><th>p95 ms</th><th>p99 ms</th><th>Draw p95</th><th>Draw p99</th><th>Max visible</th><th>60fps floor</th></tr>` + rows;
-  document.getElementById('rmeta').textContent = `${new Date().toLocaleString()} · DPR ${dpr} · viewport ${vw}×${vh} · ${navigator.userAgent}`;
+  const nat = 1000 / refreshHz;
+  const rows = res.map((r) => `<tr><td>${r.n.toLocaleString()}</td><td>${r.frames}</td><td>${r.fps.toFixed(0)}</td><td>${r.p50.toFixed(1)}</td><td>${r.p95.toFixed(1)}</td><td><b>${r.p99.toFixed(1)}</b></td><td>${r.d95.toFixed(1)}</td><td>${r.d99.toFixed(1)}</td><td>${r.maxVis.toLocaleString()}</td>${passCell(r.pass60)}${passCell(r.passNative)}</tr>`).join('');
+  document.getElementById('rtable').innerHTML = `<tr><th>Nodes</th><th>Frames</th><th>Avg FPS</th><th>p50 ms</th><th>p95 ms</th><th>p99 ms</th><th>Draw p95</th><th>Draw p99</th><th>Max visible</th><th>60 fps floor<br>(p99 ≤ ${(16.7 + JITTER).toFixed(1)})</th><th>Native ${refreshHz} Hz<br>(p99 ≤ ${(nat + JITTER).toFixed(1)})</th></tr>` + rows;
+  document.getElementById('rmeta').innerHTML = `<b>${BROWSER}</b> · renderer <b>${RENDERER}</b> · display ${refreshHz} Hz · DPR ${dpr} · viewport ${vw}×${vh} · ${new Date().toLocaleString()}<br>${navigator.userAgent}`;
   document.getElementById('results').style.display = 'flex';
   window.__benchResults = res; document.title = 'BENCH_DONE';
   setActive();
 }
-const PASS_MS = 16.7 + 1.0;
 function benchTick(now, dt, drawMs) {
   const b = bench.cur, el = now - b.t0;
   if (el >= BENCH_MS) {
     const fps = b.iv.length / (b.iv.reduce((s, v) => s + v, 0) / 1000);
     const r = { n: b.n, frames: b.iv.length, fps, p50: pct(b.iv, 0.5), p95: pct(b.iv, 0.95), p99: pct(b.iv, 0.99), d95: pct(b.dv, 0.95), d99: pct(b.dv, 0.99), maxVis: b.maxVis };
-    r.pass = r.p99 <= PASS_MS; bench.results.push(r); nextBench(); return;
+    r.pass60 = r.p99 <= 16.7 + JITTER; r.passNative = r.p99 <= 1000 / refreshHz + JITTER; bench.results.push(r); nextBench(); return;
   }
   if (el > WARM_MS) { b.iv.push(dt); b.dv.push(drawMs); b.maxVis = Math.max(b.maxVis, visibleCount); }
   progEl.textContent = `Benchmarking ${b.n.toLocaleString()} nodes… ${Math.ceil((BENCH_MS - el) / 1000)}s`;
-  benchCamera(el / BENCH_MS);
+  benchCamera(Math.max(0, el - WARM_MS) / (BENCH_MS - WARM_MS));
 }
 
 // ---------- main loop ----------
-let last = 0;
+let last = 0, lastDraw = 0;
+const detect = []; // idle frame intervals for refresh-rate detection
 function loop(now) {
-  const dt = last ? now - last : 16.7; last = now;
+  const dt = last ? now - last : 0; last = now;
+  if (!refreshHz) {
+    if (dt) detect.push(dt);
+    if (detect.length >= 40) { refreshHz = snapHz(pct(detect.slice(5), 0.5)); progEl.textContent = ''; setActive(); if (Q.has('bench')) startBench(); }
+    else { progEl.textContent = 'Detecting display refresh rate…'; requestAnimationFrame(loop); return; }
+  }
   if (bench && bench.cur) benchTick(now, dt, lastDraw);
   const t0 = performance.now(); draw(); lastDraw = performance.now() - t0;
-  ring[rn % RING] = dt; dring[rn % RING] = lastDraw; rn++;
+  if (dt) { ring[rn % RING] = dt; dring[rn % RING] = lastDraw; rn++; }
   hud(now);
   requestAnimationFrame(loop);
 }
-let lastDraw = 0;
 
 function load(n) { G = makeGraph(n); fitAll(); rn = 0; last = 0; setActive(); }
 const countsEl = document.getElementById('counts');
 function setActive() {
   countsEl.querySelectorAll('button').forEach((b) => { b.classList.toggle('on', +b.dataset.n === G.n); b.disabled = !!bench; });
-  document.getElementById('bench').disabled = !!bench;
+  document.getElementById('bench').disabled = !!bench || !refreshHz;
 }
 COUNTS.forEach((n) => { const b = document.createElement('button'); b.textContent = n / 1000 + 'k'; b.dataset.n = n; b.onclick = () => load(n); countsEl.appendChild(b); });
 document.getElementById('bench').onclick = startBench;
 document.getElementById('rclose').onclick = () => (document.getElementById('results').style.display = 'none');
+const swap = document.getElementById('swap');
+swap.textContent = RENDERER === 'v1' ? 'Use renderer v2' : 'Use renderer v1 (A/B)';
+swap.onclick = () => { const q = new URLSearchParams(location.search); if (RENDERER === 'v1') q.delete('renderer'); else q.set('renderer', 'v1'); q.delete('bench'); location.search = q.toString(); };
 
-resize(); load(+(new URLSearchParams(location.search).get('n')) || 10000);
+resize(); load(+Q.get('n') || 10000);
 requestAnimationFrame(loop);
-if (new URLSearchParams(location.search).has('bench')) startBench();

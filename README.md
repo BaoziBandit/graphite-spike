@@ -1,12 +1,19 @@
 # Graphite WP0 performance spike (throwaway)
 
-Plain JS + 2D canvas, no build step: `index.html` + `main.js` are both the source and the deployed output.
-Live: https://baozibandit.github.io/graphite-spike/  (add `?n=1000|5000|10000` to pick a fixture, `?bench` to auto-run the benchmark)
+Plain JS + 2D canvas, no build step. `docs/` is both the source and what GitHub Pages serves.
+Live: https://baozibandit.github.io/graphite-spike/
 
-- Synthetic fixtures: 1k / 5k / 10k nodes, ~1.5 edges per node, 6 node types, float64 coords offset to ~1e9, no overlaps (one node per layout cell).
-- Uniform-grid spatial index for viewport culling; edges drawn when incident to a visible node.
-- Semantic zoom: shapes (zoom < 0.12) → type icons (< 0.5) → titled cards.
-- Pan clamp to node bbox + margin; zoom floor = fit all with margin; DPR-aware canvas.
-- Auto benchmark: 15 s scripted pan/zoom sweep per count; pass = p99 frame interval ≤ 16.7 ms (+1 ms vsync jitter).
+URL params: `?n=1000|5000|10000` fixture · `?bench` auto-run · `?secs=N` seconds per count (default 15) · `?renderer=v1` old renderer for A/B.
+
+## Renderers
+- **v2 (default):** vector geometry built once per fixture into `Path2D`s per spatial tile (4096 world units) and node type, in tile-local coordinates (float64 world, small local offsets). Each frame: cull tiles, then one `fill`/`stroke` per type per visible tile under the canvas transform, so the browser re-rasterizes vectors at full resolution every frame. No bitmap caching anywhere.
+  LOD (same thresholds on every device): zoom < 0.02 grid-cell clusters (nodes would be under ~2-3 px) · < 0.12 shapes · ≥ 0.2 vector type icons · ≥ 0.5 titled cards (screen-space text, on-screen nodes only). Edges skipped only when they'd be under 2 px.
+- **v1:** per-frame grid-index query and per-node path building (original spike).
+
+## Benchmark
+15 s scripted pan/zoom sweep per count; first 1 s discarded. Refresh rate is detected at startup from idle frames. PASS columns: p99 frame time ≤ 16.7 ms (60 fps floor) and ≤ native refresh interval, each + 1 ms jitter allowance.
+
+## Test shells (Tauri v2)
+`src-tauri/` wraps `docs/` with no plugins, no commands, no capabilities, and a strict CSP. Built by `.github/workflows/tauri-spike.yml` on tag push (`v*`): Windows NSIS installer (unsigned) and debug-signed arm64 Android APK, attached to the GitHub Release.
 
 Not to be merged into the real app (see WP0 in the Graphite work packages).
