@@ -344,7 +344,7 @@ const statsEl = document.getElementById('stats'), progEl = document.getElementBy
 const LOD_NAMES = { '-1': 'clusters', 0: 'shapes', 1: 'icons', 2: 'titles' };
 let lastHud = 0;
 function hud(now) {
-  if (now - lastHud < 250) return; lastHud = now;
+  if (bench || now - lastHud < 250) return; lastHud = now; // no DOM work during benchmark runs
   const m = Math.min(rn, RING); let sum = 0; for (let i = 0; i < m; i++) sum += ring[i];
   const [p50, p95, p99] = ringPct(ring, m, [0.5, 0.95, 0.99]), [d95, d99] = ringPct(dring, m, [0.95, 0.99]);
   statsEl.innerHTML =
@@ -398,7 +398,8 @@ function benchTick(now, dt, drawMs) {
     r.pass60 = r.p99 <= 16.7 + JITTER; r.passNative = r.p99 <= 1000 / refreshHz + JITTER; bench.results.push(r); nextBench(); return;
   }
   if (el > WARM_MS) { b.iv.push(dt); b.dv.push(drawMs); b.maxVis = Math.max(b.maxVis, visibleCount); }
-  progEl.textContent = `Benchmarking ${b.n.toLocaleString()} nodes… ${Math.ceil((BENCH_MS - el) / 1000)}s`;
+  const secs = Math.ceil((BENCH_MS - el) / 1000);
+  if (secs !== b.secs) { b.secs = secs; progEl.textContent = `Benchmarking ${b.n.toLocaleString()} nodes… ${secs}s`; } // DOM touch once per second
   benchCamera(Math.max(0, el - WARM_MS) / (BENCH_MS - WARM_MS));
 }
 
