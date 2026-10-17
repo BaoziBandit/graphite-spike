@@ -20,9 +20,9 @@ jobs:
       - run: npx tauri build --bundles nsis
       - name: Rename installer
         shell: pwsh
-        run: Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1 | Copy-Item -Destination graphite-spike-v0.2-windows-x64-setup.exe
+        run: Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1 | Copy-Item -Destination graphite-spike-${{ github.ref_name }}-windows-x64-setup.exe
       - uses: actions/upload-artifact@v4
-        with: { name: windows, path: graphite-spike-v0.2-windows-x64-setup.exe }
+        with: { name: windows, path: graphite-spike-${{ github.ref_name }}-windows-x64-setup.exe }
   android:
     runs-on: ubuntu-latest
     steps:
@@ -51,10 +51,10 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           "$BT/zipalign" -p -f 4 "$APK" aligned.apk
           "$BT/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android \
-            --out graphite-spike-v0.2-android-arm64.apk aligned.apk
-          "$BT/apksigner" verify --print-certs graphite-spike-v0.2-android-arm64.apk
+            --out graphite-spike-${{ github.ref_name }}-android-arm64.apk aligned.apk
+          "$BT/apksigner" verify --print-certs graphite-spike-${{ github.ref_name }}-android-arm64.apk
       - uses: actions/upload-artifact@v4
-        with: { name: android, path: graphite-spike-v0.2-android-arm64.apk }
+        with: { name: android, path: graphite-spike-${{ github.ref_name }}-android-arm64.apk }
   release:
     needs: [windows, android]
     if: startsWith(github.ref, 'refs/tags/')
