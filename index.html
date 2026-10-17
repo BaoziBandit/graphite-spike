@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Graphite WP0 spike</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0f1115;color:#e6e8ee;font:13px/1.35 system-ui,sans-serif}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;cursor:grab}
+  #hud{position:fixed;top:8px;left:8px;background:rgba(15,17,21,.85);border:1px solid #2a2f3a;border-radius:8px;padding:8px 10px;min-width:210px;font-variant-numeric:tabular-nums;user-select:none}
+  #hud b{color:#8ab4ff}
+  #hud .row{display:flex;gap:6px;margin:4px 0;flex-wrap:wrap}
+  button{background:#1d2330;color:#e6e8ee;border:1px solid #3a4252;border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer}
+  button.on{background:#2f5bd3;border-color:#2f5bd3}
+  button:disabled{opacity:.5}
+  #stats div{white-space:nowrap}
+  #results{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(10,12,16,.92);z-index:5}
+  #results .card{background:#161a22;border:1px solid #2a2f3a;border-radius:12px;padding:16px 18px;max-width:96vw;overflow:auto}
+  #results h2{margin:0 0 4px;font-size:18px}
+  #results .meta{color:#9aa3b2;font-size:12px;margin-bottom:10px;max-width:640px}
+  table{border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{padding:6px 10px;border-bottom:1px solid #2a2f3a;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  .pass{color:#34c759;font-weight:700}.fail{color:#ff5a5a;font-weight:700}
+  #progress{color:#ffcc00}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div><b>Graphite WP0 spike</b> · 2D canvas</div>
+  <div class="row" id="counts"></div>
+  <div class="row"><button id="bench">Auto benchmark (~45s)</button></div>
+  <div id="progress"></div>
+  <div id="stats"></div>
+</div>
+<div id="results"><div class="card">
+  <h2>Graphite WP0 benchmark results</h2>
+  <div class="meta" id="rmeta"></div>
+  <table id="rtable"></table>
+  <div class="meta" style="margin-top:10px">Frame time = interval between animation frames. Pass = p99 frame time ≤ 16.7 ms (60 fps floor) + 1 ms vsync jitter allowance. Draw = CPU time spent in the draw call.</div>
+  <div class="row" style="margin-top:8px"><button id="rclose">Close</button></div>
+</div></div>
+<script src="main.js"></script>
+</body>
+</html>
